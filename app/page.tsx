@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useState, useEffect, useRef } from "react";
 import { motion, AnimatePresence } from "framer-motion";
 import Navbar from "@/components/Navbar";
 import PlatformSelector from "@/components/PlatformSelector";
@@ -12,13 +12,20 @@ import RegenerateButtons from "@/components/RegenerateButtons";
 import HistoryPanel from "@/components/HistoryPanel";
 import RedditFields from "@/components/RedditFields";
 import QuoraFields from "@/components/QuoraFields";
-import { addToHistory, HistoryEntry } from "@/lib/historyStorage";
 import type {
   Platform,
   RedditState,
   QuoraState,
   CommonState,
+  WritingStyle,
+  WordCountOption,
+  WebsitePlacement,
+  CallToAction,
+  PostObjective,
+  QuestionType,
+  AnswerDepth,
 } from "@/types/generator";
+import type { HistoryEntry } from "@/lib/historyStorage";
 
 const ACCENT_COLORS: Record<Platform, string> = {
   reddit: "#FF6B35",
@@ -73,41 +80,10 @@ const PLATFORM_LABELS = {
   },
 } as const;
 
-function buildHistoryPayload(
-  platform: Platform,
-  cur: RedditState | QuoraState,
-  redditState: RedditState,
-  quoraState: QuoraState,
-  title: string,
-  body: string
-): Omit<HistoryEntry, "id" | "timestamp"> {
-  return {
-    platform,
-    keyword: cur.keyword,
-    brand: cur.brand,
-    websiteUrl: cur.websiteUrl,
-    audience: cur.audience,
-    writingStyle: cur.writingStyle,
-    wordCount: cur.wordCount,
-    customWordCount: cur.customWordCount,
-    additionalInstructions: cur.additionalInstructions,
-    brandMention: cur.brandMention,
-    websitePlacement: cur.websitePlacement,
-    callToAction: cur.callToAction,
-    subreddit: platform === "reddit" ? redditState.subreddit : undefined,
-    postObjective: platform === "reddit" ? redditState.postObjective : undefined,
-    questionType: platform === "quora" ? quoraState.questionType : undefined,
-    answerDepth: platform === "quora" ? quoraState.answerDepth : undefined,
-    title,
-    body,
-  };
-}
-
 export default function Home() {
   const [platform, setPlatform] = useState<Platform>("reddit");
   const [redditState, setRedditState] = useState<RedditState>(DEFAULT_REDDIT);
   const [quoraState, setQuoraState] = useState<QuoraState>(DEFAULT_QUORA);
-
   const [title, setTitle] = useState("");
   const [body, setBody] = useState("");
   const [isLoading, setIsLoading] = useState(false);
@@ -116,13 +92,114 @@ export default function Home() {
   const [error, setError] = useState("");
   const [hasGenerated, setHasGenerated] = useState(false);
   const [showHistory, setShowHistory] = useState(false);
+  const [sessionLoaded, setSessionLoaded] = useState(false);
+  const [syncError, setSyncError] = useState(false);
 
   const accentColor = ACCENT_COLORS[platform];
   const anyLoading = isLoading || isLoadingTitle || isLoadingPost;
   const pl = PLATFORM_LABELS[platform];
+  const cur: RedditState | QuoraState = platform === "reddit" ? redditState : quoraState;
 
-  const cur = platform === "reddit" ? redditState : quoraState;
+  // ── Load session on mount ──────────────────────────────
+  useEffect(() => {
+    async function loadSession() {
+      try {
+        const res = await fetch("/api/session");
+        if (res.ok) {
+          const s = await res.json();
+          if (s) {
+            const common: CommonState = {
+              keyword: s.targetKeyword ?? "",
+              brand: s.brandName ?? "",
+              websiteUrl: s.websiteUrl ?? "",
+              audience: s.targetAudience ?? "",
+              writingStyle: (s.writingStyle as WritingStyle) || "natural-human",
+              wordCount: (s.wordCount as WordCountOption) || "300",
+              customWordCount: s.customWordCount ?? "",
+              additionalInstructions: s.additionalInstructions ?? "",
+            };
+            setPlatform((s.platform as Platform) || "reddit");
+            setRedditState({
+              ...common,
+              subreddit: s.redditSubreddit ?? "",
+              postObjective: (s.redditObjective as PostObjective) || "start-discussion",
+              websitePlacement: (s.websitePlacement as WebsitePlacement) || "none",
+              brandMention: s.brandMention ?? true,
+              callToAction: (s.callToAction as CallToAction) || "none",
+            });
+            setQuoraState({
+              ...common,
+              questionType: (s.quoraQuestionType as QuestionType) || "how",
+              answerDepth: (s.quoraAnswerDepth as AnswerDepth) || "detailed",
+              websitePlacement: (s.websitePlacement as WebsitePlacement) || "none",
+              brandMention: s.brandMention ?? true,
+              callToAction: (s.callToAction as CallToAction) || "none",
+            });
+            if (s.generatedTitle || s.generatedBody) {
+              setTitle(s.generatedTitle ?? "");
+              setBody(s.generatedBody ?? "");
+              setHasGenerated(true);
+            }
+          }
+        }
+      } catch {
+        // DB unavailable — continue with defaults
+      } finally {
+        setSessionLoaded(true);
+      }
+    }
+    loadSession();
+  }, []);
 
+  // ── Debounced auto-save ────────────────────────────────
+  const saveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  useEffect(() => {
+    if (!sessionLoaded) return;
+
+    const currentState = platform === "reddit" ? redditState : quoraState;
+    const payload = {
+      platform,
+      targetKeyword: currentState.keyword,
+      brandName: currentState.brand,
+      websiteUrl: currentState.websiteUrl,
+      targetAudience: currentState.audience,
+      writingStyle: currentState.writingStyle,
+      wordCount: currentState.wordCount,
+      customWordCount: currentState.customWordCount,
+      additionalInstructions: currentState.additionalInstructions,
+      redditSubreddit: redditState.subreddit,
+      redditObjective: redditState.postObjective,
+      quoraQuestionType: quoraState.questionType,
+      quoraAnswerDepth: quoraState.answerDepth,
+      websitePlacement: currentState.websitePlacement,
+      brandMention: currentState.brandMention,
+      callToAction: currentState.callToAction,
+      generatedTitle: title,
+      generatedBody: body,
+    };
+
+    if (saveTimerRef.current) clearTimeout(saveTimerRef.current);
+    saveTimerRef.current = setTimeout(async () => {
+      try {
+        const res = await fetch("/api/session", {
+          method: "PATCH",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(payload),
+        });
+        if (res.ok) setSyncError(false);
+        else setSyncError(true);
+      } catch {
+        setSyncError(true);
+      }
+    }, 800);
+
+    return () => {
+      if (saveTimerRef.current) clearTimeout(saveTimerRef.current);
+    };
+  }, [platform, redditState, quoraState, title, body, sessionLoaded]);
+
+  // ── Helpers ────────────────────────────────────────────
   function handleCommonChange(updates: Partial<CommonState>) {
     if (platform === "reddit") {
       setRedditState((prev) => ({ ...prev, ...updates }));
@@ -144,6 +221,42 @@ export default function Home() {
     return { title: data.title ?? "", body: data.body ?? "" };
   }
 
+  function buildHistoryPayload(generatedTitle: string, generatedBody: string) {
+    return {
+      platform,
+      keyword: cur.keyword,
+      brand: cur.brand,
+      websiteUrl: cur.websiteUrl,
+      audience: cur.audience,
+      writingStyle: cur.writingStyle,
+      wordCount: cur.wordCount,
+      customWordCount: cur.customWordCount,
+      additionalInstructions: cur.additionalInstructions,
+      brandMention: cur.brandMention,
+      websitePlacement: cur.websitePlacement,
+      callToAction: cur.callToAction,
+      subreddit: redditState.subreddit,
+      postObjective: redditState.postObjective,
+      questionType: quoraState.questionType,
+      answerDepth: quoraState.answerDepth,
+      title: generatedTitle,
+      body: generatedBody,
+    };
+  }
+
+  async function saveHistory(generatedTitle: string, generatedBody: string) {
+    try {
+      await fetch("/api/history", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(buildHistoryPayload(generatedTitle, generatedBody)),
+      });
+    } catch {
+      // Best-effort — don't block UX
+    }
+  }
+
+  // ── Generate handlers ──────────────────────────────────
   const handleGenerate = async () => {
     if (!cur.keyword.trim()) {
       setError("Please enter a target keyword.");
@@ -155,14 +268,12 @@ export default function Home() {
     setTitle("");
     setBody("");
 
-    const payload = { platform, ...cur, mode: "all" };
-
     try {
-      const data = await callGenerate(payload);
+      const data = await callGenerate({ platform, ...cur, mode: "all" });
       setTitle(data.title);
       setBody(data.body);
       if (data.title || data.body) {
-        addToHistory(buildHistoryPayload(platform, cur, redditState, quoraState, data.title, data.body));
+        await saveHistory(data.title, data.body);
       }
     } catch (err: unknown) {
       setError(err instanceof Error ? err.message : "Something went wrong.");
@@ -175,11 +286,10 @@ export default function Home() {
     if (!cur.keyword.trim()) return;
     setIsLoadingTitle(true);
     setError("");
-    const payload = { platform, ...cur, mode: "title", existingBody: body };
     try {
-      const data = await callGenerate(payload);
+      const data = await callGenerate({ platform, ...cur, mode: "title", existingBody: body });
       setTitle(data.title);
-      addToHistory(buildHistoryPayload(platform, cur, redditState, quoraState, data.title, body));
+      await saveHistory(data.title, body);
     } catch (err: unknown) {
       setError(err instanceof Error ? err.message : "Something went wrong.");
     } finally {
@@ -191,11 +301,10 @@ export default function Home() {
     if (!cur.keyword.trim()) return;
     setIsLoadingPost(true);
     setError("");
-    const payload = { platform, ...cur, mode: "post", existingTitle: title };
     try {
-      const data = await callGenerate(payload);
+      const data = await callGenerate({ platform, ...cur, mode: "post", existingTitle: title });
       setBody(data.body);
-      addToHistory(buildHistoryPayload(platform, cur, redditState, quoraState, title, data.body));
+      await saveHistory(title, data.body);
     } catch (err: unknown) {
       setError(err instanceof Error ? err.message : "Something went wrong.");
     } finally {
@@ -206,44 +315,52 @@ export default function Home() {
   const handleRestore = (entry: HistoryEntry) => {
     const p = entry.platform;
     setPlatform(p);
-
-    const commonFromEntry: CommonState = {
+    const common: CommonState = {
       keyword: entry.keyword ?? "",
       brand: entry.brand ?? "",
       websiteUrl: entry.websiteUrl ?? "",
       audience: entry.audience ?? "",
-      writingStyle: (entry.writingStyle as CommonState["writingStyle"]) || "natural-human",
-      wordCount: (entry.wordCount as CommonState["wordCount"]) || "300",
+      writingStyle: (entry.writingStyle as WritingStyle) || "natural-human",
+      wordCount: (entry.wordCount as WordCountOption) || "300",
       customWordCount: entry.customWordCount ?? "",
       additionalInstructions: entry.additionalInstructions ?? "",
     };
-
     if (p === "reddit") {
       setRedditState({
-        ...commonFromEntry,
+        ...common,
         subreddit: entry.subreddit ?? "",
-        postObjective: (entry.postObjective as RedditState["postObjective"]) || "start-discussion",
-        websitePlacement: (entry.websitePlacement as RedditState["websitePlacement"]) || "none",
+        postObjective: (entry.postObjective as PostObjective) || "start-discussion",
+        websitePlacement: (entry.websitePlacement as WebsitePlacement) || "none",
         brandMention: entry.brandMention ?? true,
-        callToAction: (entry.callToAction as RedditState["callToAction"]) || "none",
+        callToAction: (entry.callToAction as CallToAction) || "none",
       });
     } else {
       setQuoraState({
-        ...commonFromEntry,
-        questionType: (entry.questionType as QuoraState["questionType"]) || "how",
-        answerDepth: (entry.answerDepth as QuoraState["answerDepth"]) || "detailed",
-        websitePlacement: (entry.websitePlacement as QuoraState["websitePlacement"]) || "none",
+        ...common,
+        questionType: (entry.questionType as QuestionType) || "how",
+        answerDepth: (entry.answerDepth as AnswerDepth) || "detailed",
+        websitePlacement: (entry.websitePlacement as WebsitePlacement) || "none",
         brandMention: entry.brandMention ?? true,
-        callToAction: (entry.callToAction as QuoraState["callToAction"]) || "none",
+        callToAction: (entry.callToAction as CallToAction) || "none",
       });
     }
-
     setTitle(entry.title);
     setBody(entry.body);
     setHasGenerated(true);
     setError("");
   };
 
+  // ── Loading screen ─────────────────────────────────────
+  if (!sessionLoaded) {
+    return (
+      <div className="h-screen flex flex-col items-center justify-center bg-[#F8F9FB] gap-3">
+        <div className="w-5 h-5 rounded-full border-2 border-[#E5E7EB] border-t-[#9CA3AF] animate-spin" />
+        <p className="text-[14px] font-medium text-[#9CA3AF]">Loading Session...</p>
+      </div>
+    );
+  }
+
+  // ── Main render ────────────────────────────────────────
   return (
     <div className="h-screen flex flex-col overflow-hidden bg-[#F8F9FB]">
       <Navbar onHistoryClick={() => setShowHistory(true)} />
@@ -292,7 +409,7 @@ export default function Home() {
                   >
                     <RedditFields
                       state={redditState}
-                      onChange={(updates) => setRedditState((prev) => ({ ...prev, ...updates }))}
+                      onChange={(u) => setRedditState((p) => ({ ...p, ...u }))}
                       accentColor={accentColor}
                     />
                   </motion.div>
@@ -307,7 +424,7 @@ export default function Home() {
                   >
                     <QuoraFields
                       state={quoraState}
-                      onChange={(updates) => setQuoraState((prev) => ({ ...prev, ...updates }))}
+                      onChange={(u) => setQuoraState((p) => ({ ...p, ...u }))}
                       accentColor={accentColor}
                     />
                   </motion.div>
@@ -322,6 +439,11 @@ export default function Home() {
                 accentColor={accentColor}
               />
 
+              {syncError && (
+                <p className="text-[12px] text-red-400 text-center -mt-1">
+                  Unable to sync — working locally.
+                </p>
+              )}
             </motion.div>
 
             {/* ── RIGHT PANEL ── */}

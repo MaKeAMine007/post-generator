@@ -3,12 +3,7 @@
 import { useState, useEffect } from "react";
 import { motion, AnimatePresence } from "framer-motion";
 import { X, Clock } from "lucide-react";
-import {
-  HistoryEntry,
-  getHistory,
-  deleteHistoryEntry,
-  clearHistory,
-} from "@/lib/historyStorage";
+import type { HistoryEntry } from "@/lib/historyStorage";
 import HistoryItem from "./HistoryItem";
 
 interface HistoryPanelProps {
@@ -39,24 +34,37 @@ function groupByDate(entries: HistoryEntry[]): { label: string; items: HistoryEn
 
 export default function HistoryPanel({ isOpen, onClose, onRestore }: HistoryPanelProps) {
   const [history, setHistory] = useState<HistoryEntry[]>([]);
+  const [isLoadingHistory, setIsLoadingHistory] = useState(false);
   const [showClearConfirm, setShowClearConfirm] = useState(false);
 
   useEffect(() => {
-    if (isOpen) {
-      setHistory(getHistory());
-      setShowClearConfirm(false);
-    }
+    if (!isOpen) return;
+    setShowClearConfirm(false);
+    setIsLoadingHistory(true);
+    fetch("/api/history")
+      .then((r) => r.json())
+      .then((data) => setHistory(Array.isArray(data) ? data : []))
+      .catch(() => setHistory([]))
+      .finally(() => setIsLoadingHistory(false));
   }, [isOpen]);
 
-  const handleDelete = (id: string) => {
-    deleteHistoryEntry(id);
+  const handleDelete = async (id: string) => {
     setHistory((prev) => prev.filter((e) => e.id !== id));
+    try {
+      await fetch(`/api/history/${id}`, { method: "DELETE" });
+    } catch {
+      // Silently ignore
+    }
   };
 
-  const handleClear = () => {
-    clearHistory();
+  const handleClear = async () => {
     setHistory([]);
     setShowClearConfirm(false);
+    try {
+      await fetch("/api/history", { method: "DELETE" });
+    } catch {
+      // Silently ignore
+    }
   };
 
   const groups = groupByDate(history);
@@ -139,7 +147,12 @@ export default function HistoryPanel({ isOpen, onClose, onRestore }: HistoryPane
 
             {/* Panel content */}
             <div className="flex-1 overflow-y-auto">
-              {history.length === 0 ? (
+              {isLoadingHistory ? (
+                <div className="flex flex-col items-center justify-center h-full gap-3">
+                  <div className="w-4 h-4 rounded-full border-2 border-[#E5E7EB] border-t-[#9CA3AF] animate-spin" />
+                  <p className="text-[13px] text-[#9CA3AF]">Loading...</p>
+                </div>
+              ) : history.length === 0 ? (
                 <div className="flex flex-col items-center justify-center h-full gap-3 text-center px-6">
                   <Clock size={32} strokeWidth={1.5} className="text-[#D1D5DB]" />
                   <p className="text-[14px] font-medium text-[#9CA3AF]">No history yet</p>
